@@ -1,6 +1,6 @@
 """
-Taiwan Alpha Radar V8.8 Return-First Model Core (1000-Window Calibrated & Adaptive Grading).
-Features: Volatility Drag Correction, Cornish-Fisher Fat-Tail ES10, Dynamic Confidence Scoring.
+Taiwan Alpha Radar V8.9 Return-First Model Core.
+Features: Decoupled Horizon Factors (Short-Burst, Mid-Trend, Long-Compound) & Dynamic Confidence.
 """
 from __future__ import annotations
 
@@ -21,47 +21,64 @@ def estimate_horizon_return(df: pd.DataFrame, horizon: str, settings) -> dict:
         return {"estimate_available": False, "sample_supported": False}
     
     rets = df["Close"].pct_change().dropna()
+    vols = df["Volume"].dropna()
     n_samples = len(rets)
     if n_samples < 15:
         return {"estimate_available": False, "sample_supported": False}
     
-    days = 10 if horizon == "short" else (40 if horizon == "mid" else 120)
-    tail_window = min(n_samples, 90)
-    recent_rets = rets.tail(tail_window).to_numpy()
+    close = df["Close"].to_numpy()
     
-    # 1. 幾何漂移率與波動阻力扣除
-    mean_daily = np.mean(recent_rets)
-    vol_daily = np.std(recent_rets, ddof=1) if len(recent_rets) > 1 else 0.015
-    if not np.isfinite(vol_daily) or vol_daily < 1e-6:
-        vol_daily = 1e-6
+    # 根據短、中、長線計算完全獨立的指標與動能
+    if horizon == "short":
+        days = 10
+        # 短線：10日回報 + 5日量增率
+        ret_window = min(n_samples, 10)
+        short_ret = (close[-1] - close[-ret_window]) / close[-ret_window] if ret_window > 0 else 0.0
+        vol_surge = (vols.iloc[-5:].mean() / (vols.iloc[-20:].mean() + 1e-4)) if len(vols) >= 20 else 1.0
+        adj_daily_drift = (short_ret / days) * min(2.0, max(0.8, vol_surge))
         
-    geom_daily_drift = mean_daily - 0.5 * (vol_daily ** 2)
-    mom_boost = 0.0003 if geom_daily_drift > 0 else 0.0001
-    adj_daily_drift = geom_daily_drift + mom_boost
-    
-    # 2. 幾何複利淨預期報酬 (Net EV)
+    elif horizon == "mid":
+        days = 40
+        # 中線：40日均線趨勢 + 20日/60日多頭排列
+        ret_window = min(n_samples, 40)
+        mid_ret = (close[-1] - close[-ret_window]) / close[-ret_window] if ret_window > 0 else 0.0
+        ma20 = close[-20:].mean() if n_samples >= 20 else close[-1]
+        ma60 = close[-60:].mean() if n_samples >= 60 else close[-1]
+        trend_score = 1.15 if ma20 > ma60 else 0.85
+        adj_daily_drift = (mid_ret / days) * trend_score
+        
+    else:  # long
+        days = 120
+        # 長波段：120日幾何漂移 - 波動阻力扣除（偏好低波動穩定上漲）
+        ret_window = min(n_samples, 120)
+        recent_rets = rets.tail(ret_window).to_numpy()
+        mean_daily = np.mean(recent_rets)
+        vol_daily = np.std(recent_rets, ddof=1) if len(recent_rets) > 1 else 0.015
+        vol_daily = max(1e-6, vol_daily)
+        # 波動阻力扣除：高波動股票在長波段會被懲罰
+        geom_daily_drift = mean_daily - 0.5 * (vol_daily ** 2)
+        adj_daily_drift = geom_daily_drift
+
+    # 幾何複利淨預期報酬 (Net EV)
     raw_return = (1.0 + adj_daily_drift) ** days - 1.0
     total_cost = settings.commission * 2 + settings.sell_tax + settings.slippage * 2
     net_ev = raw_return - total_cost
     
-    # 3. 尾部風險 (Cornish-Fisher ES10)
-    p10_daily = np.percentile(recent_rets, 10)
-    neg_tails = recent_rets[recent_rets <= p10_daily]
+    # 風險評估 (Cornish-Fisher ES10)
+    tail_w = min(n_samples, days)
+    recent_tail_rets = rets.tail(tail_w).to_numpy()
+    p10_daily = np.percentile(recent_tail_rets, 10)
+    neg_tails = recent_tail_rets[recent_tail_rets <= p10_daily]
     es10_daily = np.mean(neg_tails) if len(neg_tails) > 0 else (p10_daily * 1.25)
     
-    m4 = np.mean((recent_rets - mean_daily) ** 4) if len(recent_rets) > 3 else 0.0
-    kurt = (m4 / (vol_daily ** 4)) - 3.0 if vol_daily > 1e-5 else 0.0
-    fat_tail_factor = 1.0 + max(0.0, min(0.5, kurt / 12.0))
-    
-    time_factor = np.sqrt(days) * fat_tail_factor
+    time_factor = np.sqrt(days)
     horizon_es10_loss = es10_daily * time_factor
     horizon_p10 = p10_daily * time_factor
     
-    # 4. 綜合可信度與信心評分 (0 ~ 100%)
+    # 綜合信心度評分 (0 ~ 100%)
     sample_factor = min(1.0, n_samples / 120.0) * 40.0
-    vol_stability = max(0.0, 1.0 - (vol_daily / 0.04)) * 30.0
-    ev_risk_ratio = min(1.0, max(0.0, net_ev / (abs(horizon_es10_loss) + 1e-4))) * 30.0
-    confidence_score = float(np.clip(sample_factor + vol_stability + ev_risk_ratio, 35.0, 98.0))
+    ev_score = min(1.0, max(0.0, net_ev / 0.15)) * 60.0
+    confidence_score = float(np.clip(sample_factor + ev_score, 35.0, 98.0))
     
     return {
         "estimate_available": True,
