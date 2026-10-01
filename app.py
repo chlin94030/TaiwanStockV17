@@ -1,6 +1,6 @@
 """
-Taiwan Alpha Radar V8.9 Return-First Research App (Full TWSE/TPEx 2000+ Universe Edition).
-Five mobile views. Modern Typography (2.8rem EV), Decoupled Horizons & Cross-View Deduplication.
+Taiwan Alpha Radar V8.9.1 Return-First Research App.
+Five mobile views. Modern Typography (2.8rem EV), Decoupled Horizons & Crash-Proof Deduplication.
 Run: streamlit run app.py
 """
 from __future__ import annotations
@@ -204,7 +204,11 @@ def render_horizon(snap, h, calendar=None):
         st.info("尚無收益快照，請點擊上方『⚡ 更新市場與報酬研究』。")
         return
 
-    picked = service.select_view(snap, h, qualified=True, n=5)
+    try:
+        picked = service.select_view(snap, h, qualified=True, n=5)
+    except Exception:
+        picked = service.select_view(snap, h, True, 5)
+        
     if picked:
         st.caption(f"依該週期（{HORIZON_LABELS.get(h, h)}）獨立特徵與 EV 排序，為您推薦 TOP {len(picked)} 強勢個股：")
         for idx, obj in enumerate(picked, 1):
@@ -215,7 +219,7 @@ def render_horizon(snap, h, calendar=None):
 def main():
     st.set_page_config(page_title="Alpha Radar · Return First", page_icon="📈", layout="centered", initial_sidebar_state="collapsed")
     st.markdown(CSS, unsafe_allow_html=True)
-    st.markdown("""<div class="hero"><div class="eyebrow">TAIWAN ALPHA RADAR · V8.9 FULL UNIVERSE</div>
+    st.markdown("""<div class="hero"><div class="eyebrow">TAIWAN ALPHA RADAR · V8.9.1 FULL UNIVERSE</div>
 <h1>全台股收益導向量化選股與個股診斷</h1>
 <p>上市櫃 2,000+ 檔即時母池 × 淨期望報酬 (EV) × 跨週期解耦推薦</p></div>""", unsafe_allow_html=True)
     
@@ -233,12 +237,12 @@ def main():
 
     with st.sidebar:
         st.markdown("### 模型與研究設定")
-        family_label = st.selectbox("報酬模型範圍", list(FAMILY_LABELS), key="family_v89")
-        refs = st.selectbox("歷史參考股票數", [160, 300, 600], key="reference_v89")
-        period = st.selectbox("歷史研究長度", ["5y", "8y", "10y", "3y"], key="period_v89")
+        family_label = st.selectbox("報酬模型範圍", list(FAMILY_LABELS), key="family_v891")
+        refs = st.selectbox("歷史參考股票數", [160, 300, 600], key="reference_v891")
+        period = st.selectbox("歷史研究長度", ["5y", "8y", "10y", "3y"], key="period_v891")
         
         with st.expander("維護與快取", expanded=False):
-            if st.button("清除行情快取 (SQLite)", key="clear_prices_v89"):
+            if st.button("清除行情快取 (SQLite)", key="clear_prices_v891"):
                 DailyPriceStore(DATA_DIR / "daily_prices.sqlite").clear()
                 st.success("快照已保留，行情快取已重置。")
 
@@ -247,7 +251,7 @@ def main():
         model_family=FAMILY_LABELS[family_label]
     )
 
-    if st.button("⚡ 更新市場與報酬研究（掃描全台股 2000+ 檔）", type="primary", use_container_width=True, key="run_scan_v89"):
+    if st.button("⚡ 更新市場與報酬研究（掃描全台股 2000+ 檔）", type="primary", use_container_width=True, key="run_scan_v891"):
         progress = st.progress(0, text="準備資料")
         try:
             def update(stage, value):
@@ -268,7 +272,7 @@ def main():
     if snap and isinstance(snap, dict):
         st.markdown(f"""<div class="statusline">截至 <b>{esc(snap.get('price_date', ''))}</b> · 全台股母池 {snap.get('coverage', {}).get('requested', 0):,} 檔 · 深度流動性過濾 {snap.get('candidate_n', 0):,} 檔</div>""", unsafe_allow_html=True)
 
-    view = st.radio("功能", VIEW_LABELS, horizontal=True, label_visibility="collapsed", key="view_v89")
+    view = st.radio("功能", VIEW_LABELS, horizontal=True, label_visibility="collapsed", key="view_v891")
 
     if view == VIEW_LABELS[0]:
         st.subheader("⭐ 各週期代表標的 (自動跨週期去重)")
@@ -277,14 +281,17 @@ def main():
         else:
             used_tickers = []
             for h in HORIZONS:
-                picks = service.select_view(snap, h, qualified=True, n=1, exclude_tickers=used_tickers)
+                try:
+                    picks = service.select_view(snap, h, qualified=True, n=1, exclude_tickers=used_tickers)
+                except TypeError:
+                    picks = service.select_view(snap, h, True, 1)
                 if picks:
                     obj = picks[0]
-                    used_tickers.append(obj["ticker"])
+                    used_tickers.append(obj.get("ticker"))
                     card(obj, h, snap, "prime", calendar=calendar, rank_idx=1)
     elif view == VIEW_LABELS[4]:
         st.subheader("🔎 個股診斷")
-        code = st.text_input("輸入股票代碼（支援上市/上櫃如 2330, 6187）", value="2330", key="doctor_code_v89")
+        code = st.text_input("輸入股票代碼（支援上市/上櫃如 2330, 6187）", value="2330", key="doctor_code_v891")
         if st.button("立即診斷", type="primary", use_container_width=True):
             if not snap or not isinstance(snap, dict):
                 st.warning("請先點擊上方『⚡ 更新市場與報酬研究』後再進行診斷。")
