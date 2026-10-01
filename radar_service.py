@@ -1,6 +1,6 @@
 """
-Taiwan Alpha Radar V8.8 Radar Service.
-Core orchestration & Guaranteed Adaptive Top-N Selection.
+Taiwan Alpha Radar V8.9 Radar Service.
+Core orchestration & Guaranteed Adaptive Top-N Selection with Cross-Horizon Deduplication.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from market_data import DailyPriceStore, fetch_twse_universe, _taipei_timestamp
 from policy_engine import generate_trade_plan, evaluate_entry_state
 from return_first_model import estimate_horizon_return, ModelDataError
 
-OPERATIONS_VERSION = "v8.8.0-operations"
+OPERATIONS_VERSION = "v8.9.0-operations"
 
 @dataclass
 class RunSettings:
@@ -92,14 +92,11 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
             plan = generate_trade_plan(df, h)
             state = evaluate_entry_state(df, plan)
             est = estimate_horizon_return(df, h, settings)
-            
-            # 自適應評級：只要 EV > 0 且具備最小數據強度，即納入合規審視範圍
             net_ev = est.get("strategy", {}).get("mean", -999)
-            is_qualified = bool(est.get("estimate_available") and net_ev > 0.0)
             
             horizons_eval[h] = {
                 "plan": plan, "entry_state": state, "forecast": est,
-                "qualification": {"research_qualified": is_qualified}
+                "qualification": {"research_qualified": bool(est.get("estimate_available") and net_ev > 0.0)}
             }
         
         evaluated_stocks.append({
@@ -129,15 +126,20 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
         
     return snap
 
-def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int = 5) -> list:
-    """保底輸出 Top N (預設 5 檔) 精選標的"""
+def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int = 5, exclude_tickers: list | None = None) -> list:
+    """按週期獨立指標排序，並支援跨週期去重"""
     if not snap or not isinstance(snap, dict): return []
     stocks = snap.get("stocks", [])
     if not isinstance(stocks, list) or not stocks: return []
     
-    # 按 Net EV 降序排列
+    exclude_set = set(exclude_tickers) if exclude_tickers else set()
+    
+    # 篩選未被排除的股票
+    filtered_stocks = [s for s in stocks if isinstance(s, dict) and s.get("ticker") not in exclude_set]
+    
+    # 按該週期的 Net EV 降序排列
     sorted_stocks = sorted(
-        stocks,
+        filtered_stocks,
         key=lambda x: x.get("horizons", {})
                        .get(horizon, {})
                        .get("forecast", {})
@@ -146,23 +148,7 @@ def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int 
         reverse=True
     )
     
-    if qualified:
-        # 優先挑選完全合規標的，若不足 N 檔自動由 Top 排序補齊，保底提供 3-5 檔建議
-        qual_list = [s for s in sorted_stocks if s.get("horizons", {}).get(horizon, {}).get("qualification", {}).get("research_qualified", False)]
-        if len(qual_list) >= n:
-            return qual_list[:n]
-        else:
-            # 補齊差額
-            seen = {s["ticker"] for s in qual_list}
-            for s in sorted_stocks:
-                if s["ticker"] not in seen:
-                    qual_list.append(s)
-                    seen.add(s["ticker"])
-                if len(qual_list) >= n:
-                    break
-            return qual_list[:n]
-    else:
-        return sorted_stocks[:n]
+    return sorted_stocks[:n]
 
 def diagnose(code: str, snap: dict | None, data_dir: Path) -> dict:
     snap_id = snap.get("snapshot_id", "snap_unknown") if isinstance(snap, dict) else "snap_none"
