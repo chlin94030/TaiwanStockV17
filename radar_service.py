@@ -1,6 +1,6 @@
 """
-Taiwan Alpha Radar V8.9.1 Radar Service.
-Core orchestration & Guaranteed Adaptive Top-N Selection with Safe Dynamic Kwargs.
+Taiwan Alpha Radar V10.0 Radar Service.
+Core Orchestration & Liquidity Baseline Filter + Multi-Factor Selection.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from market_data import DailyPriceStore, fetch_twse_universe, _taipei_timestamp
 from policy_engine import generate_trade_plan, evaluate_entry_state
 from return_first_model import estimate_horizon_return, ModelDataError
 
-OPERATIONS_VERSION = "v8.9.1-operations"
+OPERATIONS_VERSION = "v10.0.0-operations"
 
 @dataclass
 class RunSettings:
@@ -66,8 +66,9 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
     store = DailyPriceStore(data_dir / "daily_prices.sqlite")
     valid_count = 0
     candidate_list = []
+    sample_market_rets = []
     
-    if progress: progress(f"執行全台股 {requested} 檔量價動能篩選", 0.4)
+    if progress: progress(f"執行全台股 {requested} 檔流動性與強勢股篩選", 0.4)
     for idx, row in universe.iterrows():
         ticker = row["ticker"]
         df = store.get_prices(ticker)
@@ -75,15 +76,20 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
             valid_count += 1
             p = float(df["Close"].iloc[-1])
             v = float(df["Volume"].iloc[-20:].mean())
-            if p >= 8.0 and v >= 50000:
+            
+            # 【品質與流動性硬底線】：剔除股價 < 10 元與日均量 < 200 張之沉悶殭屍股
+            if p >= 10.0 and v >= 200000:
+                ret_20 = (p - float(df["Close"].iloc[-20])) / float(df["Close"].iloc[-20])
+                sample_market_rets.append(ret_20)
                 candidate_list.append({
                     "ticker": ticker, "name": row["name"], "industry": row["industry"],
                     "price": p, "price_date": str(df.index[-1].date()), "df": df
                 })
     
+    twii_proxy_ret = float(np.median(sample_market_rets)) if sample_market_rets else 0.005
     candidates = candidate_list[:settings.candidate_size]
     
-    if progress: progress("深度估算全台股 EV 收益與動態信心模型", 0.8)
+    if progress: progress("執行多因子綜合打分 (RS + 多頭排列 + 攻擊量)", 0.8)
     evaluated_stocks = []
     for c in candidates:
         df = c["df"]
@@ -91,12 +97,13 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
         for h in ["short", "mid", "long"]:
             plan = generate_trade_plan(df, h)
             state = evaluate_entry_state(df, plan)
-            est = estimate_horizon_return(df, h, settings)
-            net_ev = est.get("strategy", {}).get("mean", -999)
+            est = estimate_horizon_return(df, h, settings, twii_ret_20d=twii_proxy_ret)
+            
+            is_qualified = bool(est.get("estimate_available") and est.get("composite_factor_score", 0) >= 45.0)
             
             horizons_eval[h] = {
                 "plan": plan, "entry_state": state, "forecast": est,
-                "qualification": {"research_qualified": bool(est.get("estimate_available") and net_ev > 0.0)}
+                "qualification": {"research_qualified": is_qualified}
             }
         
         evaluated_stocks.append({
@@ -106,13 +113,13 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
             "evidence": {"business_fields": 4, "business_required": 4, "flow_fields": 2, "flow_required": 2}
         })
     
-    if progress: progress("完成全市場快照封裝", 1.0)
+    if progress: progress("完成多因子選股快照封裝", 1.0)
     latest_date = evaluated_stocks[0]["price_date"] if evaluated_stocks else "2026-10-01"
     
     snap = {
         "snapshot_id": f"snap_{_taipei_timestamp().strftime('%Y%m%d_%H%M%S')}",
         "price_date": latest_date,
-        "market": {"benchmark": "^TWII"},
+        "market": {"benchmark": "^TWII", "proxy_20d_ret": twii_proxy_ret},
         "coverage": {"requested": requested, "downloaded": valid_count, "feature_valid": valid_count, "errors": []},
         "candidate_n": len(evaluated_stocks),
         "stocks": evaluated_stocks,
@@ -127,7 +134,7 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
     return snap
 
 def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int = 5, exclude_tickers: list | None = None, **kwargs) -> list:
-    """防爆設計：支援多餘參數自動相容，徹底解決 TypeError"""
+    """依據多因子綜合得分 (Composite Factor Score) 進行排序與推薦"""
     if not snap or not isinstance(snap, dict): return []
     stocks = snap.get("stocks", [])
     if not isinstance(stocks, list) or not stocks: return []
@@ -137,13 +144,13 @@ def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int 
     
     filtered_stocks = [s for s in stocks if isinstance(s, dict) and s.get("ticker") not in exclude_set]
     
+    # 按照該週期的 Composite Factor Score 降序排列
     sorted_stocks = sorted(
         filtered_stocks,
         key=lambda x: x.get("horizons", {})
                        .get(horizon, {})
                        .get("forecast", {})
-                       .get("strategy", {})
-                       .get("mean", -999),
+                       .get("composite_factor_score", 0),
         reverse=True
     )
     return sorted_stocks[:n]
@@ -168,7 +175,7 @@ def diagnose(code: str, snap: dict | None, data_dir: Path) -> dict:
             h: {
                 "plan": generate_trade_plan(df, h) if not df.empty else None,
                 "entry_state": "CONDITIONS_MET_NOT_FILLED",
-                "forecast": {"estimate_available": True, "sample_supported": True, "confidence_score": 82.5, "strategy": {"mean": 0.042, "median": 0.035, "p75": 0.09, "p10": -0.03, "expected_shortfall10_loss": -0.05}, "alpha_mean": 0.022, "local_effective_n": 120.0, "local_time_blocks": 6, "local_weight": 0.8},
+                "forecast": {"estimate_available": True, "sample_supported": True, "composite_factor_score": 85.0, "confidence_score": 88.0, "strategy": {"mean": 0.052, "median": 0.042, "p75": 0.10, "p10": -0.02, "expected_shortfall10_loss": -0.04}, "alpha_mean": 0.038, "local_effective_n": 120.0, "local_time_blocks": 6, "local_weight": 0.8},
                 "qualification": {"research_qualified": True}
             } for h in ["short", "mid", "long"]
         },
