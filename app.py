@@ -1,6 +1,6 @@
 """
-Taiwan Alpha Radar V8.9.1 Return-First Research App.
-Five mobile views. Modern Typography (2.8rem EV), Decoupled Horizons & Crash-Proof Deduplication.
+Taiwan Alpha Radar V10.0 Return-First Research App.
+Five mobile views. Multi-Factor Scoring Engine & Dynamic Confidence Grading.
 Run: streamlit run app.py
 """
 from __future__ import annotations
@@ -156,6 +156,7 @@ def card(obj, h, snap, view, chart=None, calendar=None, rank_idx=1):
     
     ev = percent(summary.get("mean")) if summary.get("mean") is not None else percent(asset.get("mean"))
     conf_score = f.get("confidence_score", 75.0)
+    factor_score = f.get("composite_factor_score", 70.0)
     summary_sentence = plain_summary(f)
     status_badge = "精選首選" if rank_idx <= 2 else "強勢研究"
     setup = SETUP_LABELS.get(obj.get("setup"), obj.get("setup", ""))
@@ -171,10 +172,10 @@ def card(obj, h, snap, view, chart=None, calendar=None, rank_idx=1):
  <div class="return-box">
    <div class="return-k">策略預期淨報酬 (EV)</div>
    <div class="return-v">{ev}</div>
-   <div class="return-desc">模型投資信心度：<b>{conf_score:.1f}%</b>（樣本強度 N={f.get('local_effective_n', 120):.0f}）</div>
+   <div class="return-desc">多因子動能得分：<b>{factor_score:.1f} 分</b>｜模型投資信心度：<b>{conf_score:.1f}%</b></div>
  </div>
  <div class="stats">
-  <div class="stat"><div class="k">超額 Alpha</div><div class="v">{percent(f.get('alpha_mean'))}</div></div>
+  <div class="stat"><div class="k">大盤 Alpha</div><div class="v">{percent(f.get('alpha_mean'))}</div></div>
   <div class="stat"><div class="k">中間情境 (P50)</div><div class="v">{percent(summary.get('median'))}</div></div>
   <div class="stat"><div class="k">偏佳情境 (P75)</div><div class="v">{percent(summary.get('p75'))}</div></div>
   <div class="stat"><div class="k">最差10%損失</div><div class="v">{percent(summary.get('expected_shortfall10_loss'), False)}</div></div>
@@ -210,18 +211,18 @@ def render_horizon(snap, h, calendar=None):
         picked = service.select_view(snap, h, True, 5)
         
     if picked:
-        st.caption(f"依該週期（{HORIZON_LABELS.get(h, h)}）獨立特徵與 EV 排序，為您推薦 TOP {len(picked)} 強勢個股：")
+        st.caption(f"依據多因子量化矩陣（RS大盤強度＋多頭結構＋攻擊量）為您推薦 TOP {len(picked)} 精選標的：")
         for idx, obj in enumerate(picked, 1):
             card(obj, h, snap, h, calendar=calendar, rank_idx=idx)
     else:
         st.caption("目前市場環境下無滿足最小樣本之標的。")
 
 def main():
-    st.set_page_config(page_title="Alpha Radar · Return First", page_icon="📈", layout="centered", initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="Alpha Radar · Multi-Factor", page_icon="📈", layout="centered", initial_sidebar_state="collapsed")
     st.markdown(CSS, unsafe_allow_html=True)
-    st.markdown("""<div class="hero"><div class="eyebrow">TAIWAN ALPHA RADAR · V8.9.1 FULL UNIVERSE</div>
+    st.markdown("""<div class="hero"><div class="eyebrow">TAIWAN ALPHA RADAR · V10.0 MULTI-FACTOR</div>
 <h1>全台股收益導向量化選股與個股診斷</h1>
-<p>上市櫃 2,000+ 檔即時母池 × 淨期望報酬 (EV) × 跨週期解耦推薦</p></div>""", unsafe_allow_html=True)
+<p>上市櫃 2,000+ 檔即時母池 × 多因子綜合評分 × 跨週期解耦</p></div>""", unsafe_allow_html=True)
     
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     
@@ -237,12 +238,12 @@ def main():
 
     with st.sidebar:
         st.markdown("### 模型與研究設定")
-        family_label = st.selectbox("報酬模型範圍", list(FAMILY_LABELS), key="family_v891")
-        refs = st.selectbox("歷史參考股票數", [160, 300, 600], key="reference_v891")
-        period = st.selectbox("歷史研究長度", ["5y", "8y", "10y", "3y"], key="period_v891")
+        family_label = st.selectbox("報酬模型範圍", list(FAMILY_LABELS), key="family_v10")
+        refs = st.selectbox("歷史參考股票數", [160, 300, 600], key="reference_v10")
+        period = st.selectbox("歷史研究長度", ["5y", "8y", "10y", "3y"], key="period_v10")
         
         with st.expander("維護與快取", expanded=False):
-            if st.button("清除行情快取 (SQLite)", key="clear_prices_v891"):
+            if st.button("清除行情快取 (SQLite)", key="clear_prices_v10"):
                 DailyPriceStore(DATA_DIR / "daily_prices.sqlite").clear()
                 st.success("快照已保留，行情快取已重置。")
 
@@ -251,11 +252,11 @@ def main():
         model_family=FAMILY_LABELS[family_label]
     )
 
-    if st.button("⚡ 更新市場與報酬研究（掃描全台股 2000+ 檔）", type="primary", use_container_width=True, key="run_scan_v891"):
+    if st.button("⚡ 更新市場與報酬研究（掃描全台股 2000+ 檔）", type="primary", use_container_width=True, key="run_scan_v10"):
         progress = st.progress(0, text="準備資料")
         try:
             def update(stage, value):
-                progress.progress(min(1., max(0., value)), text="掃描全台股行情與計算 EV：" + stage)
+                progress.progress(min(1., max(0., value)), text="掃描全台股行情與多因子評分：" + stage)
             snap = service.run_scan(DATA_DIR, settings, progress=update)
             st.session_state["v8_snapshot"] = service.compact_dashboard(snap)
             st.session_state.pop("v8_doctor", None)
@@ -272,7 +273,7 @@ def main():
     if snap and isinstance(snap, dict):
         st.markdown(f"""<div class="statusline">截至 <b>{esc(snap.get('price_date', ''))}</b> · 全台股母池 {snap.get('coverage', {}).get('requested', 0):,} 檔 · 深度流動性過濾 {snap.get('candidate_n', 0):,} 檔</div>""", unsafe_allow_html=True)
 
-    view = st.radio("功能", VIEW_LABELS, horizontal=True, label_visibility="collapsed", key="view_v891")
+    view = st.radio("功能", VIEW_LABELS, horizontal=True, label_visibility="collapsed", key="view_v10")
 
     if view == VIEW_LABELS[0]:
         st.subheader("⭐ 各週期代表標的 (自動跨週期去重)")
@@ -291,7 +292,7 @@ def main():
                     card(obj, h, snap, "prime", calendar=calendar, rank_idx=1)
     elif view == VIEW_LABELS[4]:
         st.subheader("🔎 個股診斷")
-        code = st.text_input("輸入股票代碼（支援上市/上櫃如 2330, 6187）", value="2330", key="doctor_code_v891")
+        code = st.text_input("輸入股票代碼（支援上市/上櫃如 2330, 6187）", value="2330", key="doctor_code_v10")
         if st.button("立即診斷", type="primary", use_container_width=True):
             if not snap or not isinstance(snap, dict):
                 st.warning("請先點擊上方『⚡ 更新市場與報酬研究』後再進行診斷。")
