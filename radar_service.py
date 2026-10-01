@@ -1,5 +1,5 @@
 """
-Taiwan Alpha Radar V10.0 Radar Service.
+Taiwan Alpha Radar V10.2 Radar Service.
 Core Orchestration & Liquidity Baseline Filter + Multi-Factor Selection.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from market_data import DailyPriceStore, fetch_twse_universe, _taipei_timestamp
 from policy_engine import generate_trade_plan, evaluate_entry_state
 from return_first_model import estimate_horizon_return, ModelDataError
 
-OPERATIONS_VERSION = "v10.0.0-operations"
+OPERATIONS_VERSION = "v10.2.0-operations"
 
 @dataclass
 class RunSettings:
@@ -59,25 +59,28 @@ def chart_on_demand(snap: dict | None, ticker: str, data_dir: Path, allow_fetch:
     }
 
 def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
-    if progress: progress("下載並載入全台股 2000+ 檔上市櫃母池", 0.1)
+    if progress: progress("載入台股權值與主流強勢股母池", 0.1)
     universe = fetch_twse_universe()
-    requested = len(universe)
+    tickers = universe["ticker"].tolist()
     
     store = DailyPriceStore(data_dir / "daily_prices.sqlite")
+    if progress: progress("連線 Yahoo Finance 批次抓取台股即時盤面數據", 0.3)
+    store.batch_fetch_and_update(tickers, period="1y")
+    
     valid_count = 0
     candidate_list = []
     sample_market_rets = []
     
-    if progress: progress(f"執行全台股 {requested} 檔流動性與強勢股篩選", 0.4)
+    if progress: progress("過濾流動性與計算大盤基準", 0.6)
     for idx, row in universe.iterrows():
         ticker = row["ticker"]
         df = store.get_prices(ticker)
-        if len(df) >= 40:
+        if len(df) >= 30:
             valid_count += 1
             p = float(df["Close"].iloc[-1])
             v = float(df["Volume"].iloc[-20:].mean())
             
-            # 【品質與流動性硬底線】：剔除股價 < 10 元與日均量 < 200 張之沉悶殭屍股
+            # 【流動性硬門檻】：股價 >= 10元、20日均量 >= 200,000股 (剔除殭屍股)
             if p >= 10.0 and v >= 200000:
                 ret_20 = (p - float(df["Close"].iloc[-20])) / float(df["Close"].iloc[-20])
                 sample_market_rets.append(ret_20)
@@ -89,7 +92,7 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
     twii_proxy_ret = float(np.median(sample_market_rets)) if sample_market_rets else 0.005
     candidates = candidate_list[:settings.candidate_size]
     
-    if progress: progress("執行多因子綜合打分 (RS + 多頭排列 + 攻擊量)", 0.8)
+    if progress: progress("多因子綜合打分 (RS + 均線多頭 + 攻擊量)", 0.85)
     evaluated_stocks = []
     for c in candidates:
         df = c["df"]
@@ -99,7 +102,7 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
             state = evaluate_entry_state(df, plan)
             est = estimate_horizon_return(df, h, settings, twii_ret_20d=twii_proxy_ret)
             
-            is_qualified = bool(est.get("estimate_available") and est.get("composite_factor_score", 0) >= 45.0)
+            is_qualified = bool(est.get("estimate_available") and est.get("composite_factor_score", 0) >= 35.0)
             
             horizons_eval[h] = {
                 "plan": plan, "entry_state": state, "forecast": est,
@@ -120,11 +123,11 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
         "snapshot_id": f"snap_{_taipei_timestamp().strftime('%Y%m%d_%H%M%S')}",
         "price_date": latest_date,
         "market": {"benchmark": "^TWII", "proxy_20d_ret": twii_proxy_ret},
-        "coverage": {"requested": requested, "downloaded": valid_count, "feature_valid": valid_count, "errors": []},
+        "coverage": {"requested": len(universe), "downloaded": valid_count, "feature_valid": valid_count, "errors": []},
         "candidate_n": len(evaluated_stocks),
         "stocks": evaluated_stocks,
         "settings": asdict(settings),
-        "source_type": "exploratory_simulated"
+        "source_type": "live_yfinance_batch"
     }
     
     try:
@@ -134,7 +137,7 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
     return snap
 
 def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int = 5, exclude_tickers: list | None = None, **kwargs) -> list:
-    """依據多因子綜合得分 (Composite Factor Score) 進行排序與推薦"""
+    """完美相容 kwargs，徹底防範 TypeError"""
     if not snap or not isinstance(snap, dict): return []
     stocks = snap.get("stocks", [])
     if not isinstance(stocks, list) or not stocks: return []
@@ -144,7 +147,6 @@ def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int 
     
     filtered_stocks = [s for s in stocks if isinstance(s, dict) and s.get("ticker") not in exclude_set]
     
-    # 按照該週期的 Composite Factor Score 降序排列
     sorted_stocks = sorted(
         filtered_stocks,
         key=lambda x: x.get("horizons", {})
@@ -164,6 +166,7 @@ def diagnose(code: str, snap: dict | None, data_dir: Path) -> dict:
             return {"snapshot_id": snap_id, "stock": s}
     
     store = DailyPriceStore(data_dir / "daily_prices.sqlite")
+    store.batch_fetch_and_update([code], period="1y")
     df = store.get_prices(code)
     p = float(df["Close"].iloc[-1]) if not df.empty else 100.0
     p_date = str(df.index[-1].date()) if not df.empty else "2026-10-01"
