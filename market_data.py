@@ -1,36 +1,51 @@
 """
-Taiwan Alpha Radar V8.7 Market Data Layer.
-Guaranteed Full TWSE/TPEx Universe Generator (2,000+ Tickers) & SQLite WAL Engine.
+Taiwan Alpha Radar Market Data Engine V10.2.
+Batch yfinance Engine (Fast & Anti-Rate Limit) + SQLite Store.
 """
 from __future__ import annotations
 
-from pathlib import Path
 import sqlite3
+import datetime
+from pathlib import Path
 import pandas as pd
 import numpy as np
-import requests
-import io
+import yfinance as yf
 
-def _taipei_timestamp() -> pd.Timestamp:
-    return pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None)
+def _taipei_timestamp() -> datetime.datetime:
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    return datetime.datetime.now(tz)
 
-def _daily_cutoff() -> pd.Timestamp:
-    t = _taipei_timestamp()
-    return t.normalize() if t.hour >= 14 else (t.normalize() - pd.Timedelta(days=1))
+def fetch_twse_universe() -> pd.DataFrame:
+    """台股主流權值與強勢飆股母池"""
+    top_tickers = [
+        ("2330.TW", "台積電", "半導體"), ("2317.TW", "鴻海", "其他電子"),
+        ("2454.TW", "聯發科", "半導體"), ("2382.TW", "廣達", "電腦及週邊"),
+        ("3231.TW", "緯創", "電腦及週邊"), ("3017.TW", "奇鋐", "電機機械"),
+        ("6669.TW", "緯穎", "電腦及週邊"), ("2356.TW", "英業達", "電腦及週邊"),
+        ("2603.TW", "長榮", "航運業"), ("2609.TW", "陽明", "航運業"),
+        ("1519.TW", "華城", "電機機械"), ("1504.TW", "東元", "電機機械"),
+        ("2308.TW", "台達電", "電子零組件"), ("3034.TW", "聯詠", "半導體"),
+        ("2379.TW", "瑞昱", "半導體"), ("3443.TW", "創意", "半導體"),
+        ("3661.TW", "世芯-KY", "半導體"), ("2303.TW", "聯電", "半導體"),
+        ("2881.TW", "富邦金", "金融保險"), ("2882.TW", "國泰金", "金融保險"),
+        ("2345.TW", "智邦", "通信網路"), ("3037.TW", "欣興", "電子零組件"),
+        ("2376.TW", "技嘉", "電腦及週邊"), ("2357.TW", "華碩", "電腦及週邊"),
+        ("6274.TWO", "台燿", "電子零組件"), ("3264.TWO", "欣銓", "半導體"),
+        ("8299.TWO", "群聯", "半導體"), ("6187.TWO", "萬潤", "半導體設備"),
+        ("3583.TWO", "辛耘", "半導體設備"), ("3131.TWO", "弘塑", "半導體設備"),
+        ("8046.TW", "南電", "電子零組件"), ("2002.TW", "中鋼", "鋼鐵工業"),
+        ("1301.TW", "台塑", "塑膠工業"), ("1303.TW", "南亞", "塑膠工業")
+    ]
+    return pd.DataFrame(top_tickers, columns=["ticker", "name", "industry"])
 
 class DailyPriceStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        return conn
-
     def _init_db(self):
-        with self._get_connection() as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS daily_prices (
                     ticker TEXT, date TEXT, open REAL, high REAL, low REAL, close REAL, volume REAL,
@@ -39,73 +54,44 @@ class DailyPriceStore:
             """)
 
     def clear(self):
-        with self._get_connection() as conn:
+        with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM daily_prices")
 
+    def batch_fetch_and_update(self, tickers: list[str], period: str = "1y") -> None:
+        """一次性批次連線下載所有標的，解決網絡卡頓與 Rate-Limit 問題"""
+        try:
+            data = yf.download(tickers, period=period, group_by="ticker", progress=False, threads=True)
+            records = []
+            for t in tickers:
+                try:
+                    df_t = data[t].dropna(how="all") if len(tickers) > 1 else data.dropna(how="all")
+                    if df_t.empty: continue
+                    df_t.index = df_t.index.strftime("%Y-%m-%d")
+                    for idx, row in df_t.iterrows():
+                        p_close = float(row.get("Close", 0))
+                        if p_close > 0:
+                            records.append((
+                                t, str(idx), float(row.get("Open", p_close)),
+                                float(row.get("High", p_close)), float(row.get("Low", p_close)),
+                                p_close, float(row.get("Volume", 0))
+                            ))
+                except Exception: continue
+            
+            if records:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.executemany("""
+                        INSERT OR REPLACE INTO daily_prices (ticker, date, open, high, low, close, volume)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, records)
+        except Exception: pass
+
     def get_prices(self, ticker: str) -> pd.DataFrame:
-        try:
-            with self._get_connection() as conn:
-                df = pd.read_sql_query(
-                    "SELECT date, open as Open, high as High, low as Low, close as Close, volume as Volume FROM daily_prices WHERE ticker = ? ORDER BY date ASC",
-                    conn, params=(ticker,)
-                )
-        except Exception:
-            df = pd.DataFrame()
-
-        if df.empty:
-            dates = pd.date_range(end=_daily_cutoff(), periods=260, freq="B")
-            seed_val = abs(hash(ticker)) % (2**32)
-            np.random.seed(seed_val)
-            
-            drift = 0.0015 if (seed_val % 2 == 0) else 0.0003
-            returns = np.random.normal(drift, 0.016, size=260)
-            returns[-15:] += np.random.uniform(0.003, 0.009, size=15)
-            
-            price_path = 85.0 * np.exp(np.cumsum(returns))
-            df = pd.DataFrame({
-                "Open": price_path * 0.995, "High": price_path * 1.012,
-                "Low": price_path * 0.988, "Close": price_path,
-                "Volume": np.random.randint(3000, 90000, size=260)
-            }, index=dates)
-            return df
-        df["date"] = pd.to_datetime(df["date"])
-        return df.set_index("date")
-
-def fetch_twse_universe() -> pd.DataFrame:
-    tickers = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    
-    for mode, suffix in [(2, ".TW"), (4, ".TWO")]:
-        try:
-            url = f"https://isin.twse.com.tw/isin/C_public.jsp?strMode={mode}"
-            resp = requests.get(url, headers=headers, timeout=4)
-            if resp.status_code == 200:
-                tables = pd.read_html(io.StringIO(resp.text), flavor="html5lib")
-                if tables:
-                    df_isin = tables[0]
-                    df_isin.columns = df_isin.iloc[0]
-                    df_isin = df_isin.iloc[1:]
-                    for _, row in df_isin.iterrows():
-                        code_name = str(row.get("有價證券代號及名稱", ""))
-                        industry = str(row.get("產業別", "其他"))
-                        parts = code_name.split("\u3000") if "\u3000" in code_name else code_name.split(" ")
-                        if len(parts) >= 2:
-                            code, name = parts[0].strip(), parts[1].strip()
-                            if len(code) == 4 and code.isdigit():
-                                tickers.append((f"{code}{suffix}", name, industry))
-        except Exception:
-            pass
-
-    if len(tickers) >= 1000:
-        return pd.DataFrame(tickers, columns=["ticker", "name", "industry"])
-
-    full_fallback = []
-    industries = ["半導體", "電子零組件", "光電", "電腦及週邊", "通訊網路", "電機機械", "生技醫療", "化學工業", "航運業", "建材營造"]
-    
-    for code in range(1101, 9959, 4):
-        str_code = str(code)
-        suffix = ".TWO" if (code % 2 == 0) else ".TW"
-        ind = industries[code % len(industries)]
-        full_fallback.append((f"{str_code}{suffix}", f"台股{str_code}", ind))
-
-    return pd.DataFrame(full_fallback, columns=["ticker", "name", "industry"])
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query(
+                "SELECT date, open as Open, high as High, low as Low, close as Close, volume as Volume FROM daily_prices WHERE ticker = ? ORDER BY date ASC",
+                conn, params=(ticker,)
+            )
+        if not df.empty:
+            df["date"] = pd.to_datetime(df["date"])
+            df.set_index("date", inplace=True)
+        return df
