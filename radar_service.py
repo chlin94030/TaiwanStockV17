@@ -1,6 +1,6 @@
 """
-Taiwan Alpha Radar V8.9 Radar Service.
-Core orchestration & Guaranteed Adaptive Top-N Selection with Cross-Horizon Deduplication.
+Taiwan Alpha Radar V8.9.1 Radar Service.
+Core orchestration & Guaranteed Adaptive Top-N Selection with Safe Dynamic Kwargs.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from market_data import DailyPriceStore, fetch_twse_universe, _taipei_timestamp
 from policy_engine import generate_trade_plan, evaluate_entry_state
 from return_first_model import estimate_horizon_return, ModelDataError
 
-OPERATIONS_VERSION = "v8.9.0-operations"
+OPERATIONS_VERSION = "v8.9.1-operations"
 
 @dataclass
 class RunSettings:
@@ -126,18 +126,17 @@ def run_scan(data_dir: Path, settings: RunSettings, progress=None) -> dict:
         
     return snap
 
-def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int = 5, exclude_tickers: list | None = None) -> list:
-    """按週期獨立指標排序，並支援跨週期去重"""
+def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int = 5, exclude_tickers: list | None = None, **kwargs) -> list:
+    """防爆設計：支援多餘參數自動相容，徹底解決 TypeError"""
     if not snap or not isinstance(snap, dict): return []
     stocks = snap.get("stocks", [])
     if not isinstance(stocks, list) or not stocks: return []
     
-    exclude_set = set(exclude_tickers) if exclude_tickers else set()
+    ex_list = exclude_tickers or kwargs.get("exclude_list") or []
+    exclude_set = set(ex_list)
     
-    # 篩選未被排除的股票
     filtered_stocks = [s for s in stocks if isinstance(s, dict) and s.get("ticker") not in exclude_set]
     
-    # 按該週期的 Net EV 降序排列
     sorted_stocks = sorted(
         filtered_stocks,
         key=lambda x: x.get("horizons", {})
@@ -147,7 +146,6 @@ def select_view(snap: dict | None, horizon: str, qualified: bool = True, n: int 
                        .get("mean", -999),
         reverse=True
     )
-    
     return sorted_stocks[:n]
 
 def diagnose(code: str, snap: dict | None, data_dir: Path) -> dict:
