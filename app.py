@@ -1,6 +1,6 @@
 """
-Taiwan Alpha Radar V10.0 Return-First Research App.
-Five mobile views. Multi-Factor Scoring Engine & Dynamic Confidence Grading.
+Taiwan Alpha Radar V10.2 Return-First Research App.
+Five mobile views. Modern Typography (2.8rem EV), Live Multi-Factor Engine.
 Run: streamlit run app.py
 """
 from __future__ import annotations
@@ -218,52 +218,55 @@ def render_horizon(snap, h, calendar=None):
         st.caption("目前市場環境下無滿足最小樣本之標的。")
 
 def main():
-    st.set_page_config(page_title="Alpha Radar · Multi-Factor", page_icon="📈", layout="centered", initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="Alpha Radar · Live Multi-Factor", page_icon="📈", layout="centered", initial_sidebar_state="collapsed")
     st.markdown(CSS, unsafe_allow_html=True)
-    st.markdown("""<div class="hero"><div class="eyebrow">TAIWAN ALPHA RADAR · V10.0 MULTI-FACTOR</div>
+    st.markdown("""<div class="hero"><div class="eyebrow">TAIWAN ALPHA RADAR · V10.2 BATCH ENGINE</div>
 <h1>全台股收益導向量化選股與個股診斷</h1>
-<p>上市櫃 2,000+ 檔即時母池 × 多因子綜合評分 × 跨週期解耦</p></div>""", unsafe_allow_html=True)
+<p>即時連線 2,000+ 檔上市櫃市場盤面 × 多因子綜合動能打分</p></div>""", unsafe_allow_html=True)
     
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     
+    # 自動版本清理：版本變更時刪除舊的快照檔案
     if st.session_state.get("v8_version") != service.OPERATIONS_VERSION:
         for key in ("v8_snapshot", "v8_doctor", "v8_error"):
             st.session_state.pop(key, None)
         st.session_state["v8_version"] = service.OPERATIONS_VERSION
         try:
-            previous = service.load_dashboard(DATA_DIR / "dashboard_snapshot.json")
-            if previous:
-                st.session_state["v8_snapshot"] = service.compact_dashboard(previous)
+            snap_file = DATA_DIR / "dashboard_snapshot.json"
+            if snap_file.exists(): snap_file.unlink()
         except Exception: pass
 
     with st.sidebar:
         st.markdown("### 模型與研究設定")
-        family_label = st.selectbox("報酬模型範圍", list(FAMILY_LABELS), key="family_v10")
-        refs = st.selectbox("歷史參考股票數", [160, 300, 600], key="reference_v10")
-        period = st.selectbox("歷史研究長度", ["5y", "8y", "10y", "3y"], key="period_v10")
+        family_label = st.selectbox("報酬模型範圍", list(FAMILY_LABELS), key="family_v102")
+        refs = st.selectbox("歷史參考股票數", [160, 300, 600], key="reference_v102")
+        period = st.selectbox("歷史研究長度", ["5y", "8y", "10y", "3y"], key="period_v102")
         
         with st.expander("維護與快取", expanded=False):
-            if st.button("清除行情快取 (SQLite)", key="clear_prices_v10"):
+            if st.button("強制清除行情與舊快照", key="clear_prices_v102"):
                 DailyPriceStore(DATA_DIR / "daily_prices.sqlite").clear()
-                st.success("快照已保留，行情快取已重置。")
+                try: (DATA_DIR / "dashboard_snapshot.json").unlink()
+                except Exception: pass
+                st.session_state.pop("v8_snapshot", None)
+                st.success("快照與行情資料庫已強制重置！")
 
     settings = service.RunSettings(
         reference_size=int(refs), candidate_size=1000, history_period=period,
         model_family=FAMILY_LABELS[family_label]
     )
 
-    if st.button("⚡ 更新市場與報酬研究（掃描全台股 2000+ 檔）", type="primary", use_container_width=True, key="run_scan_v10"):
+    if st.button("⚡ 更新市場與報酬研究（即時連線抓取台股行情）", type="primary", use_container_width=True, key="run_scan_v102"):
         progress = st.progress(0, text="準備資料")
         try:
             def update(stage, value):
-                progress.progress(min(1., max(0., value)), text="掃描全台股行情與多因子評分：" + stage)
+                progress.progress(min(1., max(0., value)), text="連線抓取盤面與計算多因子：" + stage)
             snap = service.run_scan(DATA_DIR, settings, progress=update)
             st.session_state["v8_snapshot"] = service.compact_dashboard(snap)
             st.session_state.pop("v8_doctor", None)
             st.session_state.pop("v8_error", None)
         except Exception as exc:
             st.session_state["v8_error"] = f"{type(exc).__name__}: {exc}"
-            st.error("掃描中置，已保留前次成功快照。")
+            st.error("掃描中置，請點擊側邊欄『強制清除行情與舊快照』後重試。")
         finally:
             progress.empty()
 
@@ -271,14 +274,14 @@ def main():
     calendar = calendar_reference(DATA_DIR, now=_taipei_timestamp())
 
     if snap and isinstance(snap, dict):
-        st.markdown(f"""<div class="statusline">截至 <b>{esc(snap.get('price_date', ''))}</b> · 全台股母池 {snap.get('coverage', {}).get('requested', 0):,} 檔 · 深度流動性過濾 {snap.get('candidate_n', 0):,} 檔</div>""", unsafe_allow_html=True)
+        st.markdown(f"""<div class="statusline">截至 <b>{esc(snap.get('price_date', ''))}</b> · 即時母池 {snap.get('coverage', {}).get('requested', 0):,} 檔 · 深度過濾 {snap.get('candidate_n', 0):,} 檔</div>""", unsafe_allow_html=True)
 
-    view = st.radio("功能", VIEW_LABELS, horizontal=True, label_visibility="collapsed", key="view_v10")
+    view = st.radio("功能", VIEW_LABELS, horizontal=True, label_visibility="collapsed", key="view_v102")
 
     if view == VIEW_LABELS[0]:
         st.subheader("⭐ 各週期代表標的 (自動跨週期去重)")
         if not snap or not isinstance(snap, dict):
-            st.info("尚無收益快照，請點擊上方『⚡ 更新市場與報酬研究』。")
+            st.info("尚無收益快照，請點擊上方『⚡ 更新市場與報酬研究』進行即時連線掃描。")
         else:
             used_tickers = []
             for h in HORIZONS:
@@ -292,7 +295,7 @@ def main():
                     card(obj, h, snap, "prime", calendar=calendar, rank_idx=1)
     elif view == VIEW_LABELS[4]:
         st.subheader("🔎 個股診斷")
-        code = st.text_input("輸入股票代碼（支援上市/上櫃如 2330, 6187）", value="2330", key="doctor_code_v10")
+        code = st.text_input("輸入股票代碼（支援上市/上櫃如 2330, 6187）", value="2330", key="doctor_code_v102")
         if st.button("立即診斷", type="primary", use_container_width=True):
             if not snap or not isinstance(snap, dict):
                 st.warning("請先點擊上方『⚡ 更新市場與報酬研究』後再進行診斷。")
